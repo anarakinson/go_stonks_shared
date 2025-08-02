@@ -15,7 +15,7 @@ type RedisCacheInterceptor struct {
 }
 
 // создает новый интерсептор на основе клиента редис
-func NewInterceptor(redis *redis.Client) *RedisCacheInterceptor {
+func NewRedisCacheInterceptor(redis *redis.Client) *RedisCacheInterceptor {
 	return &RedisCacheInterceptor{
 		redis: redis,
 	}
