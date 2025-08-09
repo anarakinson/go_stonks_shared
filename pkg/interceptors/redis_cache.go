@@ -2,8 +2,10 @@ package interceptors
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -12,14 +14,34 @@ import (
 )
 
 type RedisCacheInterceptor struct {
-	redis  *redis.Client
-	pubSub *redis.PubSub
+	redis     *redis.Client
+	pubSub    *redis.PubSub
+	maxMemory int64
 }
+
+var (
+	errTooBigData  = errors.New("data is too big for caching")
+	errInvalidType = errors.New("invalid type")
+)
 
 // создает новый интерсептор на основе клиента редис
 func NewRedisCacheInterceptor(redis *redis.Client) *RedisCacheInterceptor {
+	var maxMemory int64 = 0
+	config, err := redis.ConfigGet(context.Background(), "maxmemory").Result()
+	if err != nil {
+		slog.Error("Failed to get Redis config", "error", err)
+	} else {
+		maxMemoryStr := config["maxmemory"]
+		maxMemory, err = strconv.ParseInt(maxMemoryStr, 10, 64)
+		if err != nil {
+			slog.Error("Failed to parse maxMemory value", "error", err)
+			maxMemory = 0
+		}
+	}
+
 	return &RedisCacheInterceptor{
-		redis: redis,
+		redis:     redis,
+		maxMemory: maxMemory,
 	}
 }
 
@@ -75,8 +97,20 @@ func (i *RedisCacheInterceptor) Unary(
 		// Пробуем получить из кеша
 		cachedData, err := i.redis.Get(ctx, cacheKey).Bytes()
 		if err == nil {
-			slog.Info("Returning cached data", "cache key", cacheKey)
-			return proto.Unmarshal(cachedData, reply.(proto.Message))
+			// пытаемся десериализовать
+			if err = proto.Unmarshal(cachedData, reply.(proto.Message)); err != nil {
+				// удаляем ключ, который невозможно десериализовать и продолжаем
+				slog.Info("Error unmarshaling cached data", "cache key", cacheKey)
+				i.redis.Del(ctx, cacheKey)
+			} else {
+				// возвращаем кеш
+				slog.Info("Returning cached data", "cache key", cacheKey)
+				return nil
+			}
+		}
+		if err != redis.Nil {
+			// если ошибка не в отсутствии ключа - логируем проблему
+			slog.Error("Redis get error", "error", err, "key", cacheKey)
 		}
 
 		// Вызываем оригинальный метод
@@ -84,8 +118,20 @@ func (i *RedisCacheInterceptor) Unary(
 			return err
 		}
 
+		// проверяем, возможно ли преобразовать ответ к нужному типу данных
+		msg, ok := reply.(proto.Message)
+		if !ok {
+			slog.Error("Failed to serialize data to type", "error", errInvalidType)
+			return errInvalidType
+		}
 		// Сохраняем в кеш
-		if data, err := proto.Marshal(reply.(proto.Message)); err == nil {
+		if data, err := proto.Marshal(msg); err == nil {
+			// проверяем, поместятся ли полученные данные в кеш
+			if len(data) > int(i.maxMemory) {
+				slog.Error("Failed to save data to cache", "error", errTooBigData)
+				return errTooBigData
+			}
+			// кешируем
 			if err := i.redis.Set(ctx, cacheKey, data, ttl).Err(); err != nil {
 				slog.Error("Failed to cache data", "error", err)
 			} else {
