@@ -34,9 +34,9 @@ func NewGRPCClient(
 		grpc.WithChainUnaryInterceptor(interceptors...),
 		// поддержка соединения
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                10 * time.Second,
-			Timeout:             5 * time.Second,
-			PermitWithoutStream: true,
+			Time:                30 * time.Second, // Отправлять PING каждые 30 сек
+			Timeout:             10 * time.Second, // Ждать ответа 10 сек
+			PermitWithoutStream: true,             // PING даже без активных стримов
 		}),
 		// балансировщик нагрузки
 		grpc.WithDefaultServiceConfig(`{"loadBalancingConfig": [{"round_robin":{}}]}`),
